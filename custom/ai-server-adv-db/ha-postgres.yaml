@@ -12,6 +12,13 @@ spec:
   instances:
     - name: pgha
       replicas: 2
+      resources:
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+        requests:
+          cpu: "1"
+          memory: "2Gi"
       dataVolumeClaimSpec:
         accessModes:
           - "ReadWriteOnce"
@@ -27,7 +34,7 @@ spec:
                 labelSelector:
                   matchLabels:
                     postgres-operator.crunchydata.com/cluster: ai-postgres
-                    postgres-operator.crunchydata.com/instance-set: pgha1
+                    postgres-operator.crunchydata.com/instance-set: pgha
   backups:
     pgbackrest:
       repos:
