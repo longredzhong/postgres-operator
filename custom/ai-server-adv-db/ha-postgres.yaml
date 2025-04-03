@@ -8,6 +8,7 @@ spec:
     - name: longred
       databases:
         - ai-server-adv
+      options: "SUPERUSER"
   instances:
     - name: pgha
       replicas: 2
