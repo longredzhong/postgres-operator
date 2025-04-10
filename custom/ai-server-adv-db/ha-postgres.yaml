@@ -9,6 +9,9 @@ spec:
       databases:
         - ai-server-adv
       options: "SUPERUSER"
+  config:
+    parameters:
+      max_connections: 1000
   instances:
     - name: pgha
       replicas: 2
