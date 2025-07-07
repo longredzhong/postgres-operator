@@ -11,14 +11,14 @@ spec:
       options: "SUPERUSER"
   config:
     parameters:
-      max_connections: 2000
+      max_connections: 3000
   instances:
     - name: pgha
-      replicas: 2
+      replicas: 3
       resources:
         limits:
-          cpu: "2"
-          memory: "8Gi"
+          cpu: "4"
+          memory: "16Gi"
         requests:
           cpu: "1"
           memory: "4Gi"
