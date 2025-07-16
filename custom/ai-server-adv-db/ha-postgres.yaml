@@ -12,9 +12,10 @@ spec:
   config:
     parameters:
       max_connections: 3000
+
   instances:
     - name: pgha
-      replicas: 3
+      replicas: 2
       resources:
         limits:
           cpu: "4"
@@ -49,3 +50,18 @@ spec:
               resources:
                 requests:
                   storage: 40Gi
+
+  proxy:
+    pgBouncer:
+      pgBouncer:
+      replicas: 2
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    postgres-operator.crunchydata.com/cluster: ai-postgres
+                    postgres-operator.crunchydata.com/role: pgbouncer
