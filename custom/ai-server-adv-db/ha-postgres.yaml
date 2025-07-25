@@ -15,7 +15,7 @@ spec:
 
   instances:
     - name: pgha
-      replicas: 2
+      replicas: 3
       resources:
         limits:
           cpu: "4"
@@ -28,8 +28,20 @@ spec:
           - "ReadWriteOnce"
         resources:
           requests:
-            storage: 20Gi
+            storage: 40Gi
       affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/master
+                    operator: Exists
+            - weight: 50
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 1
