@@ -39,7 +39,6 @@ spec:
                     operator: In
                     values:
                       - adtiger-3090x2
-                      - adtiger-rtx-pro-6000
             - weight: 50
               preference:
                 matchExpressions:
