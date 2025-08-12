@@ -35,8 +35,11 @@ spec:
             - weight: 100
               preference:
                 matchExpressions:
-                  - key: node-role.kubernetes.io/master
-                    operator: Exists
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - adtiger-3090x2
+                      - adtiger-rtx-pro-6000
             - weight: 50
               preference:
                 matchExpressions:
