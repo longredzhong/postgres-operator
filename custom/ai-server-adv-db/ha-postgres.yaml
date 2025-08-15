@@ -15,7 +15,7 @@ spec:
 
   instances:
     - name: pgha
-      replicas: 3
+      replicas: 2
       resources:
         limits:
           cpu: "4"
