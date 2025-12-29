@@ -11,18 +11,18 @@ spec:
       options: "SUPERUSER"
   config:
     parameters:
-      max_connections: 3000
+      max_connections: 600
 
   instances:
     - name: pgha
-      replicas: 2
+      replicas: 3
       resources:
         limits:
           cpu: "4"
-          memory: "16Gi"
+          memory: "8Gi"
         requests:
           cpu: "1"
-          memory: "4Gi"
+          memory: "8Gi"
       dataVolumeClaimSpec:
         accessModes:
           - "ReadWriteOnce"
@@ -63,7 +63,7 @@ spec:
                 - "ReadWriteOnce"
               resources:
                 requests:
-                  storage: 40Gi
+                  storage: 200Gi
 
   proxy:
     pgBouncer:
