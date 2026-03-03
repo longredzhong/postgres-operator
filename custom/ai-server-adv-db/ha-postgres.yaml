@@ -19,10 +19,10 @@ spec:
       resources:
         limits:
           cpu: "4"
-          memory: "8Gi"
+          memory: "16Gi"
         requests:
           cpu: "1"
-          memory: "8Gi"
+          memory: "16Gi"
       dataVolumeClaimSpec:
         accessModes:
           - "ReadWriteOnce"
@@ -39,11 +39,11 @@ spec:
                     operator: In
                     values:
                       - adtiger-3090x2
-            - weight: 50
-              preference:
-                matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: Exists
+            # - weight: 50
+            #   preference:
+            #     matchExpressions:
+            #       - key: node-role.kubernetes.io/control-plane
+            #         operator: Exists
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 1
