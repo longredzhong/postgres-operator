@@ -1,0 +1,176 @@
+# PostgreSQL 集群灾难恢复配置示例
+# 
+# 使用场景：当所有副本数据都损坏，需要从 pgBackRest 备份完全恢复集群时使用此配置
+# 
+# 操作步骤：
+# 1. 缩减副本数到 0: kubectl patch postgrescluster ai-postgres -n postgres-operator --type='json' -p='[{"op": "replace", "path": "/spec/instances/0/replicas", "value": 0}]'
+# 2. 删除所有数据 PVC (保留 repo PVC)
+# 3. 应用此配置: kubectl apply -f disaster-recovery-example.yaml
+# 4. 等待恢复完成
+# 5. 恢复完成后，删除 dataSource 部分，重新应用配置
+#
+# ⚠️ 警告：此配置会覆盖现有数据！请确保这是您想要的操作！
+
+apiVersion: postgres-operator.crunchydata.com/v1beta1
+kind: PostgresCluster
+metadata:
+  name: ai-postgres
+  namespace: postgres-operator
+spec:
+  postgresVersion: 17
+  
+  # ============================================
+  # 灾难恢复配置 - 从备份恢复
+  # ============================================
+  dataSource:
+    pgbackrest:
+      stanza: db
+      configuration:
+        - secret:
+            name: ai-postgres-pgbackrest-secret
+      global:
+        repo1-path: /pgbackrest/repo1
+      repo:
+        name: repo1
+        # ----------------------------------------
+        # 选项 1: 恢复到最新备份（默认）
+        # 不需要额外配置，注释掉下面的 options
+        # ----------------------------------------
+        
+        # ----------------------------------------
+        # 选项 2: 恢复到特定时间点
+        # 取消注释以下行，修改时间为目标时间
+        # ----------------------------------------
+        # options:
+        #   - --type=time
+        #   - --target="2026-03-03 07:00:00"
+        #   - --target-action=promote  # 可选: promote | pause | shutdown
+        
+        # ----------------------------------------
+        # 选项 3: 恢复到特定 LSN
+        # ----------------------------------------
+        # options:
+        #   - --type=lsn
+        #   - --target="0/3000000"
+        
+        # ----------------------------------------
+        # 选项 4: 恢复到特定事务 ID
+        # ----------------------------------------
+        # options:
+        #   - --type=xid
+        #   - --target="12345"
+  
+  # ============================================
+  # 用户配置
+  # ============================================
+  users:
+    - name: longred
+      databases:
+        - ai-server-adv
+      options: "SUPERUSER"
+  
+  # ============================================
+  # PostgreSQL 配置
+  # ============================================
+  config:
+    parameters:
+      max_connections: 600
+  
+  # ============================================
+  # 实例配置
+  # ============================================
+  instances:
+    - name: pgha
+      replicas: 3  # 恢复后会创建 3 个副本
+      resources:
+        limits:
+          cpu: "4"
+          memory: "16Gi"
+        requests:
+          cpu: "1"
+          memory: "16Gi"
+      dataVolumeClaimSpec:
+        accessModes:
+          - "ReadWriteOnce"
+        resources:
+          requests:
+            storage: 40Gi
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - adtiger-3090x2
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    postgres-operator.crunchydata.com/cluster: ai-postgres
+                    postgres-operator.crunchydata.com/instance-set: pgha
+  
+  # ============================================
+  # 备份配置（使用现有备份存储）
+  # ============================================
+  backups:
+    pgbackrest:
+      repos:
+        - name: repo1
+          volume:
+            volumeClaimSpec:
+              accessModes:
+                - "ReadWriteOnce"
+              resources:
+                requests:
+                  storage: 200Gi
+          # 恢复后的备份计划
+          schedules:
+            full: "0 2 * * 0"        # 每周日 2:00 AM 全量备份
+            incremental: "0 2 * * 1-6"  # 每天 2:00 AM 增量备份
+      global:
+        # 备份保留策略
+        repo1-retention-full: "4"      # 保留 4 个全量备份
+        repo1-retention-diff: "2"      # 保留 2 个差异备份
+  
+  # ============================================
+  # PgBouncer 连接池（可选）
+  # ============================================
+  proxy:
+    pgBouncer:
+      pgBouncer:
+      replicas: 2
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    postgres-operator.crunchydata.com/cluster: ai-postgres
+                    postgres-operator.crunchydata.com/role: pgbouncer
+
+# ============================================
+# 恢复后检查清单
+# ============================================
+# 1. 等待所有 Pod Ready:
+#    kubectl get pods -n postgres-operator -l postgres-operator.crunchydata.com/cluster=ai-postgres
+#
+# 2. 检查 Patroni 状态:
+#    kubectl exec -n postgres-operator ai-postgres-pgha-<xxx>-0 -c database -- patronictl list
+#
+# 3. 验证数据库连接:
+#    kubectl exec -n postgres-operator ai-postgres-pgha-<xxx>-0 -c database -- psql -U postgres -c "SELECT version();"
+#
+# 4. 检查数据完整性:
+#    kubectl exec -n postgres-operator ai-postgres-pgha-<xxx>-0 -c database -- psql -U longred -d ai-server-adv -c "\dt"
+#
+# 5. ⚠️ 重要：恢复完成后删除 spec.dataSource 部分
+#    编辑此文件删除 dataSource，然后重新应用:
+#    kubectl apply -f disaster-recovery-example.yaml

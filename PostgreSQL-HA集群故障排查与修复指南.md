@@ -218,6 +218,276 @@ kubectl get postgrescluster ai-postgres -n postgres-operator -o yaml | grep -A 1
 - 删除的只是损坏副本的 PVC
 - 新副本会从 Leader 完整同步数据（pg_basebackup 或 pgBackRest）
 
+## 灾难恢复：从备份完全重建集群
+
+### 场景：整个集群完全损坏
+
+当遇到以下情况时，需要从备份完全重建集群：
+- 所有 3 个副本的 PVC 都损坏
+- 没有任何健康的 Pod 可以作为数据源
+- 数据库文件系统损坏且无法修复
+- 需要回滚到历史某个时间点
+
+### 前提条件检查
+
+#### 1. 确认备份可用
+```bash
+# 检查备份 Pod 状态
+kubectl get pod -n postgres-operator | grep repo-host
+
+# 查看可用的备份
+kubectl exec -n postgres-operator ai-postgres-repo-host-0 -- \
+  pgbackrest --stanza=db info
+
+# 应该看到类似输出：
+# stanza: db
+#     status: ok
+#     
+#     full backup: 20250901-030749F
+#         timestamp start/stop: 2025-09-01 03:07:49+00 / 2025-09-01 03:09:44+00
+#         database size: 29.6MB
+#     
+#     incr backup: 20250901-030749F_20251229-034213I
+#         timestamp start/stop: 2025-12-29 03:42:13+00 / 2025-12-29 03:44:39+00
+#         database size: 1.4GB
+```
+
+#### 2. 确认备份存储完好
+```bash
+# 检查备份 PVC
+kubectl get pvc -n postgres-operator | grep repo
+
+# 检查备份存储空间
+kubectl exec -n postgres-operator ai-postgres-repo-host-0 -- df -h /pgbackrest
+```
+
+### 恢复方法 A：在线恢复（推荐）
+
+**适用场景**: 需要保留集群配置，只恢复数据
+
+#### 步骤 1: 删除所有实例 Pod 和数据 PVC
+```bash
+# 缩减副本数到 0（停止所有实例）
+kubectl patch postgrescluster ai-postgres -n postgres-operator \
+  --type='json' -p='[{"op": "replace", "path": "/spec/instances/0/replicas", "value": 0}]'
+
+# 等待所有实例 Pod 被删除
+kubectl get pods -n postgres-operator -l postgres-operator.crunchydata.com/instance-set=pgha -w
+
+# 删除所有数据 PVC（保留备份 PVC！）
+kubectl get pvc -n postgres-operator | grep pgha.*pgdata | awk '{print $1}' | \
+  xargs -I {} kubectl delete pvc {} -n postgres-operator
+
+# 验证 PVC 已删除
+kubectl get pvc -n postgres-operator | grep pgdata
+# 应该没有输出
+
+# ⚠️ 重要：不要删除 repo PVC！
+# ai-postgres-pgbackrest-repo 必须保留
+```
+
+#### 步骤 2: 配置集群从备份恢复
+
+编辑 `ha-postgres.yaml` 添加恢复配置：
+
+```yaml
+apiVersion: postgres-operator.crunchydata.com/v1beta1
+kind: PostgresCluster
+metadata:
+  name: ai-postgres
+spec:
+  postgresVersion: 17
+  
+  # 添加恢复配置
+  dataSource:
+    pgbackrest:
+      stanza: db
+      configuration:
+        - secret:
+            name: ai-postgres-pgbackrest-secret
+      global:
+        repo1-path: /pgbackrest/repo1
+      repo:
+        name: repo1
+        # 恢复到最新备份
+        # options:
+        #   - --type=time
+        #   - --target="2026-03-03 07:00:00"  # 可选：恢复到指定时间点
+  
+  # 其他配置保持不变
+  users:
+    - name: longred
+      databases:
+        - ai-server-adv
+      options: "SUPERUSER"
+  
+  instances:
+    - name: pgha
+      replicas: 3
+      # ... 其余配置
+```
+
+#### 步骤 3: 应用配置并启动恢复
+```bash
+# 应用更新的配置（触发恢复）
+kubectl apply -k custom/ai-server-adv-db/
+
+# 监控恢复进度
+kubectl get pods -n postgres-operator -l postgres-operator.crunchydata.com/cluster=ai-postgres -w
+
+# 查看恢复日志
+kubectl logs -n postgres-operator ai-postgres-pgha-<xxx>-0 -c database -f
+```
+
+**恢复过程日志示例**：
+```log
+INFO: restore command begin
+INFO: using stanza: db
+INFO: restore backup set 20251229-034213I
+INFO: write <DATA_DIRECTORY>/backup_label
+INFO: write <DATA_DIRECTORY>/postgresql.auto.conf
+INFO: restore file <DATA_DIRECTORY>/global/pg_control
+...
+INFO: restore file <DATA_DIRECTORY>/base/...
+INFO: restore completed successfully
+INFO: starting PostgreSQL
+```
+
+#### 步骤 4: 验证恢复成功
+```bash
+# 等待所有 Pod Ready（可能需要 10-60 分钟，取决于数据库大小）
+kubectl get pods -n postgres-operator -l postgres-operator.crunchydata.com/instance-set=pgha
+
+# 检查 Patroni 集群状态
+kubectl exec -n postgres-operator ai-postgres-pgha-<xxx>-0 -c database -- patronictl list
+
+# 验证数据库可连接
+kubectl exec -n postgres-operator ai-postgres-pgha-<xxx>-0 -c database -- \
+  psql -U postgres -c "SELECT version();"
+
+# 检查数据是否完整
+kubectl exec -n postgres-operator ai-postgres-pgha-<xxx>-0 -c database -- \
+  psql -U longred -d ai-server-adv -c "\dt"  # 列出所有表
+```
+
+#### 步骤 5: 移除恢复配置（重要！）
+```bash
+# 恢复完成后，从 ha-postgres.yaml 中删除 dataSource 配置
+# 否则集群重启时会重复执行恢复！
+
+# 编辑配置文件，移除 dataSource 部分
+# 然后重新应用
+kubectl apply -k custom/ai-server-adv-db/
+```
+
+### 恢复方法 B：完全重建集群
+
+**适用场景**: 需要全新环境，或者集群资源损坏严重
+
+#### 步骤 1: 备份当前配置和备份数据
+```bash
+# 导出 PostgresCluster 配置
+kubectl get postgrescluster ai-postgres -n postgres-operator -o yaml > ai-postgres-backup.yaml
+
+# 如果备份 PVC 也可能受影响，先导出备份数据
+kubectl exec -n postgres-operator ai-postgres-repo-host-0 -- \
+  tar czf /tmp/pgbackrest-backup.tar.gz /pgbackrest/repo1
+
+# 复制到本地
+kubectl cp postgres-operator/ai-postgres-repo-host-0:/tmp/pgbackrest-backup.tar.gz \
+  ./pgbackrest-backup.tar.gz
+```
+
+#### 步骤 2: 完全删除集群
+```bash
+# 删除 PostgresCluster（会删除所有关联资源）
+kubectl delete -k custom/ai-server-adv-db/
+
+# 等待所有资源清理完成
+kubectl get all,pvc -n postgres-operator | grep ai-postgres
+# 应该没有输出（除了 repo PVC 如果配置为保留）
+
+# 如果 PVC 卡住，强制删除
+kubectl patch pvc <pvc-name> -n postgres-operator \
+  -p '{"metadata":{"finalizers":null}}'
+```
+
+#### 步骤 3: 重建集群（使用 dataSource）
+```bash
+# 使用包含 dataSource 配置的 yaml 重新创建集群
+kubectl apply -k custom/ai-server-adv-db/
+
+# 集群会自动从备份恢复
+```
+
+### 恢复到特定时间点 (Point-in-Time Recovery)
+
+如果需要恢复到历史某个时刻（例如：误删除数据前）：
+
+```yaml
+spec:
+  dataSource:
+    pgbackrest:
+      stanza: db
+      configuration:
+        - secret:
+            name: ai-postgres-pgbackrest-secret
+      global:
+        repo1-path: /pgbackrest/repo1
+      repo:
+        name: repo1
+        options:
+          - --type=time
+          - --target="2026-03-02 15:30:00"  # 恢复到此时间点
+          # 或使用 LSN
+          # - --type=lsn
+          # - --target="0/3000000"
+```
+
+### 恢复时间估算
+
+| 数据库大小 | Full Backup 恢复时间 | Incremental + WAL 重放时间 |
+|-----------|---------------------|--------------------------|
+| < 10 GB   | 5-10 分钟             | +2-5 分钟                 |
+| 10-100 GB | 15-30 分钟            | +10-30 分钟               |
+| 100-500 GB| 1-2 小时              | +30-60 分钟               |
+| > 500 GB  | 2-5 小时              | +1-3 小时                 |
+
+*实际时间取决于磁盘 I/O 性能*
+
+### 恢复后验证清单
+
+- [ ] 所有 Pod 状态为 Running (4/4)
+- [ ] Patroni 集群有 1 个 Leader，2 个 Replica streaming
+- [ ] 数据库可以正常连接
+- [ ] 关键表数据完整性检查
+- [ ] 应用连接测试通过
+- [ ] 移除 `dataSource` 配置防止重复恢复
+- [ ] 验证新备份可以正常创建
+
+### 常见恢复问题
+
+#### Q1: 恢复失败 "backup set not found"
+```bash
+# 检查备份 stanza 是否正确
+kubectl exec -n postgres-operator ai-postgres-repo-host-0 -- \
+  pgbackrest --stanza=db info
+
+# 检查备份文件是否存在
+kubectl exec -n postgres-operator ai-postgres-repo-host-0 -- \
+  ls -lh /pgbackrest/repo1/backup/db/
+```
+
+#### Q2: 恢复后数据不完整
+- 检查是否恢复到了正确的时间点
+- 查看 WAL 归档是否完整
+- 验证增量备份链是否完整
+
+#### Q3: 恢复速度很慢
+- 检查存储 IOPS 性能
+- 考虑使用并行恢复（pgBackRest 支持）
+- 验证网络带宽（如果备份在远程存储）
+
 ## 预防措施
 
 ### 1. 监控告警
@@ -227,6 +497,8 @@ kubectl get postgrescluster ai-postgres -n postgres-operator -o yaml | grep -A 1
 - Pod Ready 状态
 - 复制延迟 (Lag in MB < 100)
 - PVC 使用率 (< 80%)
+- pgBackRest 备份成功率（应该 100%）
+- 最后一次成功备份时间（< 24 小时）
 ```
 
 ### 2. 资源保障
@@ -240,21 +512,47 @@ instances:
       requests:
         cpu: "1"      # 避免 CPU throttling
         memory: "16Gi" # 避免 OOM
+
+# 备份存储也需要充足空间
+backups:
+  pgbackrest:
+    repos:
+      - name: repo1
+        volume:
+          volumeClaimSpec:
+            resources:
+              requests:
+                storage: 200Gi  # 至少是数据库大小的 2-3 倍
 ```
 
-### 3. 定期备份
+### 3. 定期备份与测试
 ```bash
 # 验证 pgBackRest 备份正常
 kubectl exec -n postgres-operator ai-postgres-repo-host-0 -- \
   pgbackrest --stanza=db info
 
-# 定期测试恢复流程
+# 定期测试恢复流程（建议每月一次）
+# 在非生产环境测试完整恢复流程
+
+# 配置自动备份（在 PostgresCluster 中）
+spec:
+  backups:
+    pgbackrest:
+      repos:
+        - name: repo1
+          schedules:
+            full: "0 1 * * 0"       # 每周日 1:00 AM 全量备份
+            incremental: "0 1 * * 1-6"  # 每天 1:00 AM 增量备份
 ```
 
 ### 4. 健康检查
 ```bash
 # 定期检查集群健康（可以加入 cron）
 kubectl exec -n postgres-operator <any-pod> -c database -- patronictl list
+
+# 检查备份历史
+kubectl exec -n postgres-operator ai-postgres-repo-host-0 -- \
+  pgbackrest --stanza=db info --output=json | jq '.[] | .backup'
 ```
 
 ### 5. 网络稳定性
@@ -262,24 +560,69 @@ kubectl exec -n postgres-operator <any-pod> -c database -- patronictl list
 - 监控 API Server 响应时间
 - 考虑增加 Patroni 超时配置（如果环境压力大）
 
+### 6. 备份策略建议
+```yaml
+# 推荐的备份策略
+- 全量备份: 每周一次（周末低峰期）
+- 增量备份: 每天一次
+- WAL 归档: 实时（自动）
+- 备份保留: 
+  - 全量备份保留 4 周
+  - 增量备份保留 2 周
+  - WAL 保留对应备份周期
+
+# 在 PostgresCluster 中配置
+spec:
+  backups:
+    pgbackrest:
+      global:
+        repo1-retention-full: "4"
+        repo1-retention-diff: "2"
+      repos:
+        - name: repo1
+          schedules:
+            full: "0 2 * * 0"
+            incremental: "0 2 * * 1-6"
+```
+
 ## 总结
 
 ### 关键经验
 1. ✅ **重启 Operator 是首选方案** - 安全且自动化
 2. ✅ **缩减副本数再删除 PVC** - 避免 StatefulSet 立即重建
 3. ✅ **确保至少 2 个健康副本** - 数据安全第一
-4. ⚠️ **不要惊慌删除 PVC** - 先诊断，后操作
+4. ✅ **定期验证备份可用性** - 灾难恢复的保险
+5. ⚠️ **不要惊慌删除 PVC** - 先诊断，后操作
+6. ⚠️ **恢复后必须移除 dataSource** - 防止重复恢复
+
+### 故障分级与处理策略
+
+| 故障级别 | 场景描述 | 处理方案 | 预计恢复时间 |
+|---------|---------|---------|------------|
+| **L1 轻微** | 单个副本 Pod 异常 | 重启 Pod 或删除 PVC | 5-15 分钟 |
+| **L2 中等** | 无 Leader 选举 | 重启 Operator | 1-5 分钟 |
+| **L3 严重** | 多个副本损坏 | 缩减副本 + 重建 | 10-60 分钟 |
+| **L4 灾难** | 全集群数据损坏 | 从备份恢复 | 1-5 小时 |
 
 ### 操作优先级
+
+**常规故障（有健康副本）**:
 ```
 诊断 → 重启 Operator → 验证 Leader 选举 → 
 缩减副本 → 删除损坏 PVC → 恢复副本 → 验证同步
 ```
 
+**灾难恢复（无健康副本）**:
+```
+验证备份可用 → 缩减副本到 0 → 删除所有数据 PVC → 
+配置 dataSource → 应用配置触发恢复 → 验证数据 → 移除 dataSource
+```
+
 ### 时间参考
 - Operator 重启触发选举: **15-30 秒**
 - Pod 初始化完成: **1-2 分钟**
-- 数据同步完成: **5-60 分钟**（取决于数据库大小）
+- 副本数据同步: **5-60 分钟**（从健康副本）
+- 从备份恢复: **10 分钟 - 5 小时**（取决于数据库大小和备份类型）
 
 ## 相关资源
 
