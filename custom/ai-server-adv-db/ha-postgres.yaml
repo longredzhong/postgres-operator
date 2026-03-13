@@ -53,9 +53,10 @@ spec:
                     operator: In
                     values:
                       - adtiger-4090x8
-                      - adtiger-3090x2
                       - adtiger-rtx-pro-6000
                       - adtiger-eq
+                      - adtiger-eq-2
+                      - adtiger-eq-3
             # - weight: 50
             #   preference:
             #     matchExpressions:
