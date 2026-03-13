@@ -11,10 +11,14 @@ spec:
       options: "SUPERUSER"
   config:
     parameters:
-      max_connections: 600
+      # 当前活跃连接远低于 600，配合 PgBouncer 先收敛到更稳妥的上限，
+      # 避免 backend 进程过多并放大 work_mem 的内存风险。
+      max_connections: 300
       shared_buffers: "4GB"
       effective_cache_size: "12GB"
-      work_mem: "122MB"
+      # work_mem 是按执行节点/排序/哈希分配的，不是实例总量；
+      # 在较高连接数场景下保持保守，避免查询高峰时内存放大。
+      work_mem: "32MB"
       maintenance_work_mem: "256MB"
 
       # 额外优化
@@ -48,7 +52,10 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
+                      - adtiger-4090x8
                       - adtiger-3090x2
+                      - adtiger-rtx-pro-6000
+                      - adtiger-eq
             # - weight: 50
             #   preference:
             #     matchExpressions:
