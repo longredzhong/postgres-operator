@@ -4,6 +4,22 @@ metadata:
   name: ai-postgres
 spec:
   postgresVersion: 17
+  # 家庭服务器环境下每天凌晨会有一次路由器重启，
+  # Patroni 需要对短时网络抖动更宽容，避免因为几十秒到几分钟的
+  # 控制面/网络闪断而触发不必要的故障转移。
+  patroni:
+    dynamicConfiguration:
+      # Patroni 每 10 秒检查一次集群状态；保持默认量级，避免过于频繁地放大瞬时抖动。
+      loop_wait: 10
+      # 遇到 API / DCS / 网络短时异常时多给一些重试时间，减少误判。
+      retry_timeout: 30
+      # leader 锁的 TTL 适度放宽到 90 秒，降低家庭网络波动导致的误切主概率。
+      ttl: 90
+      # 当 Kubernetes API / DCS 短时不可达时尽可能保持当前主库继续服务，
+      # 对家庭环境这种“已知会有短时网络抖动”的场景更友好。
+      failsafe_mode: true
+      # 不启用同步复制，避免副本抖动时把主库写入也一起拖慢或阻塞。
+      synchronous_mode: false
   users:
     - name: longred
       databases:
@@ -15,17 +31,44 @@ spec:
       # 避免 backend 进程过多并放大 work_mem 的内存风险。
       max_connections: 300
       shared_buffers: "4GB"
-      effective_cache_size: "12GB"
+      # 对容器化数据库而言，planner 看到的 OS page cache 不应直接按内存上限估算；
+      # 保守一些更符合当前 12Gi limit / 8Gi request 的运行边界。
+      effective_cache_size: "8GB"
       # work_mem 是按执行节点/排序/哈希分配的，不是实例总量；
       # 在较高连接数场景下保持保守，避免查询高峰时内存放大。
       work_mem: "32MB"
-      maintenance_work_mem: "256MB"
+      # Hatchet 会产生较多写入和清理任务，适度提高 maintenance_work_mem
+      # 有助于 vacuum / index maintenance，但避免一次性拉到过高造成内存挤压。
+      maintenance_work_mem: "512MB"
 
       # 额外优化
       random_page_cost: "1.1"
       effective_io_concurrency: 200
       wal_buffers: "16MB"
       checkpoint_completion_target: "0.9"
+      # Hatchet 写入密集时更大的 WAL 缓冲区能减少 checkpoint 抖动，
+      # 相比文档中的更大示例，这里先采用对 40Gi 数据盘更稳妥的中间值。
+      max_wal_size: "4GB"
+      # 为短时网络闪断预留更多 WAL，避免副本在路由器重启后因为缺少 WAL
+      # 被迫重新全量追赶或频繁 reinit。
+      wal_keep_size: "4GB"
+      # 放宽主从之间的复制超时，降低几十秒到数分钟网络抖动导致的复制连接误判。
+      wal_sender_timeout: "180s"
+      wal_receiver_timeout: "180s"
+      # TCP keepalive 用于更温和地探测断连，避免过于激进或过于迟钝。
+      tcp_keepalives_idle: 60
+      tcp_keepalives_interval: 10
+      tcp_keepalives_count: 6
+
+      # Hatchet 的 workflow / step / event 表更容易出现高 churn 和表膨胀；
+      # 在不显著放大后台资源竞争的前提下，适度提高 autovacuum 积极性。
+      autovacuum_max_workers: 5
+      autovacuum_vacuum_scale_factor: "0.1"
+      autovacuum_analyze_scale_factor: "0.05"
+      autovacuum_vacuum_threshold: 25
+      autovacuum_analyze_threshold: 25
+      autovacuum_vacuum_cost_delay: "10ms"
+      autovacuum_vacuum_cost_limit: 1000
 
   instances:
     - name: pgha
@@ -33,10 +76,11 @@ spec:
       resources:
         limits:
           cpu: "4"
-          memory: "16Gi"
+          memory: "12Gi"
         requests:
-          cpu: "1"
-          memory: "16Gi"
+          # Hatchet 的典型数据库瓶颈更偏 CPU；适当提高 request 能减少节点争用时的抖动。
+          cpu: "2"
+          memory: "8Gi"
       dataVolumeClaimSpec:
         accessModes:
           - "ReadWriteOnce"
@@ -52,11 +96,11 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
-                      - adtiger-4090x8
-                      - adtiger-rtx-pro-6000
                       - adtiger-eq
                       - adtiger-eq-2
                       - adtiger-eq-3
+                      - adtiger-4090x8
+                      - adtiger-rtx-pro-6000
             # - weight: 50
             #   preference:
             #     matchExpressions:

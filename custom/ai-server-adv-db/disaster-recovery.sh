@@ -12,6 +12,7 @@
 #   --namespace NAMESPACE    命名空间（默认: postgres-operator）
 #   --replicas N            目标副本数（默认: 3）
 #   --backup-time "TIME"    恢复到指定时间点（可选，格式: "2026-03-03 07:00:00"）
+#   --backup-set LABEL       指定 pgBackRest 备份集标签（默认: 自动选择最新成功备份）
 #   --dry-run               仅显示将要执行的操作，不实际执行
 #   --skip-confirmation     跳过确认提示（危险！）
 #
@@ -21,6 +22,9 @@
 #
 #   # 恢复到指定时间点
 #   ./disaster-recovery.sh --backup-time "2026-03-02 15:30:00"
+#
+#   # 使用指定备份集恢复
+#   ./disaster-recovery.sh --backup-set 20250901-030749F_20251229-034213I
 #
 #   # 仅查看将要执行的操作
 #   ./disaster-recovery.sh --dry-run
@@ -32,6 +36,7 @@ CLUSTER_NAME="ai-postgres"
 NAMESPACE="postgres-operator"
 REPLICAS=3
 BACKUP_TIME=""
+BACKUP_SET=""
 DRY_RUN=false
 SKIP_CONFIRM=false
 
@@ -60,6 +65,10 @@ while [[ $# -gt 0 ]]; do
             BACKUP_TIME="$2"
             shift 2
             ;;
+        --backup-set)
+            BACKUP_SET="$2"
+            shift 2
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
@@ -86,6 +95,65 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+require_python3() {
+    if ! command -v python3 &> /dev/null; then
+        log_error "需要 python3 来解析 pgBackRest JSON 输出"
+        exit 1
+    fi
+}
+
+get_repo_pod() {
+    kubectl get pods -n "$NAMESPACE" \
+        -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/data=pgbackrest \
+        -o name 2>/dev/null | head -1
+}
+
+resolve_latest_backup_set() {
+    require_python3
+
+    local repo_pod
+    repo_pod=$(get_repo_pod)
+
+    if [ -z "$repo_pod" ]; then
+        log_error "找不到备份 repo Pod"
+        exit 1
+    fi
+
+    local backup_json
+    if ! backup_json=$(kubectl exec -n "$NAMESPACE" "$repo_pod" -- pgbackrest --stanza=db info --output=json 2>/dev/null); then
+        log_error "无法读取 pgBackRest 备份元数据"
+        exit 1
+    fi
+
+    local latest_label
+    latest_label=$(python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+backups = []
+for stanza in data:
+    for backup in stanza.get("backup", []):
+        if backup.get("error") is False:
+            backups.append(backup)
+
+if not backups:
+    sys.exit(2)
+
+latest = max(backups, key=lambda item: item.get("timestamp", {}).get("stop", 0))
+print(latest.get("label", ""))
+' <<< "$backup_json")
+
+    if [ -z "$latest_label" ]; then
+        log_error "没有找到可用于恢复的成功备份集"
+        exit 1
+    fi
+
+    echo "$latest_label"
 }
 
 # 执行命令函数
@@ -134,7 +202,7 @@ check_prerequisites() {
 check_backups() {
     log_info "检查可用备份..."
     
-    local repo_pod=$(kubectl get pods -n "$NAMESPACE" -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/data=pgbackrest -o name | head -1)
+    local repo_pod=$(get_repo_pod)
     
     if [ -z "$repo_pod" ]; then
         log_error "找不到备份 repo Pod"
@@ -150,6 +218,13 @@ check_backups() {
             exit 1
         }
         echo ""
+    fi
+
+    if [ -z "$BACKUP_SET" ]; then
+        BACKUP_SET=$(resolve_latest_backup_set)
+        log_info "自动选择最新成功备份集: $BACKUP_SET"
+    else
+        log_info "使用指定备份集: $BACKUP_SET"
     fi
 }
 
@@ -167,10 +242,11 @@ confirm_operation() {
     echo "  集群名称: $CLUSTER_NAME"
     echo "  命名空间: $NAMESPACE"
     echo "  目标副本数: $REPLICAS"
+    echo "  备份集: ${BACKUP_SET:-自动检测}"
     if [ -n "$BACKUP_TIME" ]; then
         echo "  恢复时间点: $BACKUP_TIME"
     else
-        echo "  恢复时间点: 最新备份"
+        echo "  恢复时间点: 备份集结束时刻（最新备份）"
     fi
     echo ""
     log_warn "此操作将："
@@ -249,15 +325,52 @@ delete_data_pvcs() {
 # 步骤 3: 更新配置添加 dataSource
 update_config() {
     log_info "步骤 3: 更新 PostgresCluster 配置..."
-    
-    local patch='{"spec":{"dataSource":{"pgbackrest":{"stanza":"db","configuration":[{"secret":{"name":"'$CLUSTER_NAME'-pgbackrest-secret"}}],"global":{"repo1-path":"/pgbackrest/repo1"},"repo":{"name":"repo1"'
-    
+
+    local patch
+    patch=$(CLUSTER_NAME="$CLUSTER_NAME" BACKUP_SET="$BACKUP_SET" BACKUP_TIME="$BACKUP_TIME" python3 - <<'PY'
+import json
+import os
+
+cluster_name = os.environ["CLUSTER_NAME"]
+backup_set = os.environ["BACKUP_SET"]
+backup_time = os.environ.get("BACKUP_TIME", "")
+
+options = [f"--set={backup_set}"]
+if backup_time:
+    options.extend([
+        "--type=time",
+        f"--target={backup_time}",
+    ])
+
+patch = {
+    "spec": {
+        "dataSource": {
+            "pgbackrest": {
+                "stanza": "db",
+                "configuration": [
+                    {"secret": {"name": f"{cluster_name}-pgbackrest-secret"}}
+                ],
+                "global": {
+                    "repo1-path": "/pgbackrest/repo1"
+                },
+                "repo": {
+                    "name": "repo1",
+                    "options": options,
+                },
+            }
+        }
+    }
+}
+
+print(json.dumps(patch, ensure_ascii=False))
+PY
+)
+
+    log_info "恢复将使用备份集: $BACKUP_SET"
     if [ -n "$BACKUP_TIME" ]; then
-        patch+=', "options":["--type=time","--target='$BACKUP_TIME'"]'
+        log_info "并恢复到时间点: $BACKUP_TIME"
     fi
-    
-    patch+='}}}}}'
-    
+
     run_cmd "kubectl patch postgrescluster $CLUSTER_NAME -n $NAMESPACE --type=merge -p '$patch'"
 }
 
