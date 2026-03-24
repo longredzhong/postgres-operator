@@ -126,9 +126,9 @@ check_patroni() {
         return 1
     fi
     
-    local leader_count=$(echo "$patroni_output" | grep -c "Leader" || echo "0")
-    local replica_count=$(echo "$patroni_output" | grep -c "Replica" || echo "0")
-    local streaming_count=$(echo "$patroni_output" | grep -c "streaming" || echo "0")
+    local leader_count=$(echo "$patroni_output" | grep -c "Leader")
+    local replica_count=$(echo "$patroni_output" | grep -c "Replica")
+    local streaming_count=$(echo "$patroni_output" | grep -c "streaming")
     
     if [ "$leader_count" -eq 1 ]; then
         check_item "ok" "Leader: $leader_count"
