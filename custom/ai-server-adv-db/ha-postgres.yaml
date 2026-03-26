@@ -27,9 +27,8 @@ spec:
       options: "SUPERUSER"
   config:
     parameters:
-      # 当前活跃连接远低于 600，配合 PgBouncer 先收敛到更稳妥的上限，
       # 避免 backend 进程过多并放大 work_mem 的内存风险。
-      max_connections: 300
+      max_connections: 600
       shared_buffers: "4GB"
       # 对容器化数据库而言，planner 看到的 OS page cache 不应直接按内存上限估算；
       # 保守一些更符合当前 12Gi limit / 8Gi request 的运行边界。
