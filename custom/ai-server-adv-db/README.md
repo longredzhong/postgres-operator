@@ -16,6 +16,7 @@
   - PgBouncer 连接池（2 个副本）
   - pgBackRest 自动备份
   - Pod 反亲和性调度
+  - 已预加载 `timescaledb`，首次部署后仍需在目标数据库中执行 `CREATE EXTENSION timescaledb;`
 
 **部署**:
 ```bash

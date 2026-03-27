@@ -21,12 +21,14 @@ spec:
       # 不启用同步复制，避免副本抖动时把主库写入也一起拖慢或阻塞。
       synchronous_mode: false
   users:
-    - name: longred
-      databases:
-        - ai-server-adv
-      options: "SUPERUSER"
+  - name: longred
+    databases:
+    - ai-server-adv
+    options: "SUPERUSER"
   config:
     parameters:
+      # timescaledb 需要预加载，否则后续 CREATE EXTENSION 会报错。
+      shared_preload_libraries: "timescaledb"
       # 避免 backend 进程过多并放大 work_mem 的内存风险。
       max_connections: 600
       shared_buffers: "4GB"
@@ -70,61 +72,61 @@ spec:
       autovacuum_vacuum_cost_limit: 1000
 
   instances:
-    - name: pgha
-      replicas: 3
+  - name: pgha
+    replicas: 3
+    resources:
+      limits:
+        cpu: "4"
+        memory: "12Gi"
+      requests:
+        # Hatchet 的典型数据库瓶颈更偏 CPU；适当提高 request 能减少节点争用时的抖动。
+        cpu: "2"
+        memory: "8Gi"
+    dataVolumeClaimSpec:
+      accessModes:
+      - "ReadWriteOnce"
       resources:
-        limits:
-          cpu: "4"
-          memory: "12Gi"
         requests:
-          # Hatchet 的典型数据库瓶颈更偏 CPU；适当提高 request 能减少节点争用时的抖动。
-          cpu: "2"
-          memory: "8Gi"
-      dataVolumeClaimSpec:
-        accessModes:
-          - "ReadWriteOnce"
-        resources:
-          requests:
-            storage: 40Gi
-      affinity:
-        nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      - adtiger-eq
-                      - adtiger-eq-2
-                      - adtiger-eq-3
-                      - adtiger-4090x8
-                      - adtiger-rtx-pro-6000
-            # - weight: 50
-            #   preference:
-            #     matchExpressions:
-            #       - key: node-role.kubernetes.io/control-plane
-            #         operator: Exists
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 1
-              podAffinityTerm:
-                topologyKey: kubernetes.io/hostname
-                labelSelector:
-                  matchLabels:
-                    postgres-operator.crunchydata.com/cluster: ai-postgres
-                    postgres-operator.crunchydata.com/instance-set: pgha
+          storage: 40Gi
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+              - adtiger-eq
+              - adtiger-eq-2
+              - adtiger-eq-3
+              - adtiger-4090x8
+              - adtiger-rtx-pro-6000
+        # - weight: 50
+        #   preference:
+        #     matchExpressions:
+        #       - key: node-role.kubernetes.io/control-plane
+        #         operator: Exists
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                postgres-operator.crunchydata.com/cluster: ai-postgres
+                postgres-operator.crunchydata.com/instance-set: pgha
   backups:
     pgbackrest:
       repos:
-        - name: repo1
-          volume:
-            volumeClaimSpec:
-              accessModes:
-                - "ReadWriteOnce"
-              resources:
-                requests:
-                  storage: 200Gi
+      - name: repo1
+        volume:
+          volumeClaimSpec:
+            accessModes:
+            - "ReadWriteOnce"
+            resources:
+              requests:
+                storage: 200Gi
 
   proxy:
     pgBouncer:
@@ -133,10 +135,10 @@ spec:
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 1
-              podAffinityTerm:
-                topologyKey: kubernetes.io/hostname
-                labelSelector:
-                  matchLabels:
-                    postgres-operator.crunchydata.com/cluster: ai-postgres
-                    postgres-operator.crunchydata.com/role: pgbouncer
+          - weight: 1
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  postgres-operator.crunchydata.com/cluster: ai-postgres
+                  postgres-operator.crunchydata.com/role: pgbouncer
