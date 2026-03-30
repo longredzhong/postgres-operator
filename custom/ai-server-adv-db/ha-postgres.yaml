@@ -25,6 +25,12 @@ spec:
     databases:
     - ai-server-adv
     options: "SUPERUSER"
+
+  - name: lunana
+    databases:
+    - Lunana
+    - Lunana_db_lake
+
   config:
     parameters:
       # timescaledb 需要预加载，否则后续 CREATE EXTENSION 会报错。
