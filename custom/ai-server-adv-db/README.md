@@ -14,6 +14,7 @@
   - PostgreSQL 17
   - 3 个实例副本，支持高可用
   - PgBouncer 连接池（2 个副本）
+  - 对外暴露 NodePort 端口（主库 + PgBouncer）
   - pgBackRest 自动备份
   - Pod 反亲和性调度
   - 已预加载 `timescaledb`，首次部署后仍需在目标数据库中执行 `CREATE EXTENSION timescaledb;`
@@ -22,6 +23,15 @@
 ```bash
 kubectl apply -k custom/ai-server-adv-db/
 ```
+
+**外部访问端口**:
+```text
+主库直连 Service: ai-postgres-primary-nodeport (NodePort 30434)
+PgBouncer Service: ai-postgres-pgbouncer-nodeport (NodePort 30433)
+
+```
+
+建议应用默认通过 PgBouncer 端口访问；只有管理操作、排障或明确需要绕过连接池时，再使用主库直连端口。
 
 #### `disaster-recovery-example.yaml`
 **灾难恢复配置示例** - 包含 dataSource 配置的完整示例

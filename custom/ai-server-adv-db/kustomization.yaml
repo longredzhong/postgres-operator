@@ -5,3 +5,4 @@ namespace: postgres-operator
 
 resources:
 - ha-postgres.yaml
+- db-nodeport-services.yaml
