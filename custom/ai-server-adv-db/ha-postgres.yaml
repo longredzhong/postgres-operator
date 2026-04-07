@@ -2,6 +2,7 @@ apiVersion: postgres-operator.crunchydata.com/v1beta1
 kind: PostgresCluster
 metadata:
   name: ai-postgres
+  namespace: postgres-operator
 spec:
   postgresVersion: 17
   # 家庭服务器环境下每天凌晨会有一次路由器重启，
@@ -53,12 +54,13 @@ spec:
       effective_io_concurrency: 200
       wal_buffers: "16MB"
       checkpoint_completion_target: "0.9"
+      # 压缩 WAL，减少归档和复制链路上的 WAL 体积。
+      wal_compression: "on"
       # Hatchet 写入密集时更大的 WAL 缓冲区能减少 checkpoint 抖动，
-      # 相比文档中的更大示例，这里先采用对 40Gi 数据盘更稳妥的中间值。
-      max_wal_size: "4GB"
-      # 为短时网络闪断预留更多 WAL，避免副本在路由器重启后因为缺少 WAL
-      # 被迫重新全量追赶或频繁 reinit。
-      wal_keep_size: "4GB"
+      # 这里改为更保守的上限，减少 pg_wal 的膨胀。
+      max_wal_size: "2GB"
+      # 为副本保留必要的追赶窗口，但不再保留过多本地 WAL。
+      wal_keep_size: "2GB"
       # 放宽主从之间的复制超时，降低几十秒到数分钟网络抖动导致的复制连接误判。
       wal_sender_timeout: "180s"
       wal_receiver_timeout: "180s"
@@ -129,8 +131,8 @@ spec:
         repo1-retention-full: "2"
         # 在每周全量备份之间保留一周内的增量链，兼顾恢复点和 repo 占用。
         repo1-retention-diff: "6"
-        # WAL 归档按最近 2 个全量备份窗口保留，避免 archive 长期无限增长。
-        repo1-retention-archive: "2"
+        # WAL 归档只保留最近 1 个全量备份窗口，明显降低仓库里的 WAL 占用。
+        repo1-retention-archive: "1"
       repos:
       - name: repo1
         schedules:
