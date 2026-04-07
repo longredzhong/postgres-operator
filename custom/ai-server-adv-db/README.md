@@ -132,6 +132,9 @@ PgBouncer Service: ai-postgres-pgbouncer-nodeport (NodePort 30433)
 ### `kustomization.yaml`
 **Kustomize 配置** - 用于 kubectl apply -k 部署
 
+#### `longhorn-capacity-record.md`
+**Longhorn 容量记录与清理建议** - 汇总当前 ai-postgres 各 PVC 的 Longhorn 实际占用、Pod 内可见占用，以及快照清理和告警阈值建议。
+
 ## 使用场景
 
 ### 场景 1: 日常运维检查
