@@ -93,7 +93,7 @@ spec:
       - "ReadWriteOnce"
       resources:
         requests:
-          storage: 80Gi
+          storage: 120Gi
     affinity:
       nodeAffinity:
         preferredDuringSchedulingIgnoredDuringExecution:
@@ -124,15 +124,27 @@ spec:
                 postgres-operator.crunchydata.com/instance-set: pgha
   backups:
     pgbackrest:
+      global:
+        # 至少保留 2 个全量备份，避免在单次备份异常后过快丢失回滚窗口。
+        repo1-retention-full: "2"
+        # 在每周全量备份之间保留一周内的增量链，兼顾恢复点和 repo 占用。
+        repo1-retention-diff: "6"
+        # WAL 归档按最近 2 个全量备份窗口保留，避免 archive 长期无限增长。
+        repo1-retention-archive: "2"
       repos:
       - name: repo1
+        schedules:
+          # 每周日凌晨执行一次全量备份，推动旧 WAL 具备过期条件。
+          full: "0 3 * * 0"
+          # 其余每天凌晨执行一次增量备份，缩短恢复窗口并持续推进备份链。
+          incremental: "0 3 * * 1-6"
         volume:
           volumeClaimSpec:
             accessModes:
             - "ReadWriteOnce"
             resources:
               requests:
-                storage: 200Gi
+                storage: 400Gi
 
   proxy:
     pgBouncer:
