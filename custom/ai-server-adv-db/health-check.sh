@@ -75,6 +75,44 @@ check_item() {
     esac
 }
 
+get_database_pod() {
+    local ready_pod
+    ready_pod=$(kubectl get pods -n "$NAMESPACE" \
+        -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/data=postgres \
+        --no-headers 2>/dev/null | awk '{split($2, a, "/"); if ($3 == "Running" && a[1] == a[2]) print $1}' | head -1)
+
+    if [ -n "$ready_pod" ]; then
+        echo "pod/$ready_pod"
+        return 0
+    fi
+
+    local running_pod
+    running_pod=$(kubectl get pods -n "$NAMESPACE" \
+        -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/data=postgres \
+        --no-headers 2>/dev/null | awk '$3 == "Running" {print $1}' | head -1)
+
+    if [ -n "$running_pod" ]; then
+        echo "pod/$running_pod"
+        return 0
+    fi
+
+    return 1
+}
+
+get_repo_pod() {
+    local repo_pod
+    repo_pod=$(kubectl get pods -n "$NAMESPACE" \
+        -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/data=pgbackrest \
+        --no-headers 2>/dev/null | awk '$3 == "Running" {print $1}' | head -1)
+
+    if [ -n "$repo_pod" ]; then
+        echo "pod/$repo_pod"
+        return 0
+    fi
+
+    return 1
+}
+
 # 检查 Pod 状态
 check_pods() {
     echo ""
@@ -89,8 +127,11 @@ check_pods() {
         return 1
     fi
     
-    local total_pods=$(echo "$pods" | wc -l)
-    local ready_pods=$(echo "$pods" | awk '{if ($2 ~ /\//) {split($2, a, "/"); if (a[1] == a[2] && $3 == "Running") print}}' | wc -l)
+    local active_pods
+    active_pods=$(echo "$pods" | awk '$1 !~ /-repo[0-9]+-(full|diff|incr)-/')
+
+    local total_pods=$(echo "$active_pods" | wc -l)
+    local ready_pods=$(echo "$active_pods" | awk '{if ($2 ~ /\//) {split($2, a, "/"); if (a[1] == a[2] && $3 == "Running") print}}' | wc -l)
     
     if [ "$ready_pods" -eq "$total_pods" ]; then
         check_item "ok" "所有 Pod 正常 ($ready_pods/$total_pods)"
@@ -111,8 +152,8 @@ check_patroni() {
     echo "  Patroni 集群状态"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    local pod=$(kubectl get pods -n "$NAMESPACE" -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/role=master -o name 2>/dev/null | head -1 || \
-                kubectl get pods -n "$NAMESPACE" -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/instance-set=pgha -o name 2>/dev/null | head -1)
+    local pod=""
+    pod=$(get_database_pod || true)
     
     if [ -z "$pod" ]; then
         check_item "error" "找不到可用的 Pod 执行检查"
@@ -155,7 +196,8 @@ check_backups() {
     echo "  备份状态检查"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    local repo_pod=$(kubectl get pods -n "$NAMESPACE" -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/data=pgbackrest -o name 2>/dev/null | head -1)
+    local repo_pod=""
+    repo_pod=$(get_repo_pod || true)
     
     if [ -z "$repo_pod" ]; then
         check_item "error" "找不到备份 repo Pod"
@@ -184,14 +226,16 @@ check_backups() {
         check_item "error" "备份 Stanza 状态异常: $stanza_status"
     fi
     
-    local full_backup_count=$(echo "$backup_info" | grep -c "full backup:" || echo "0")
+    local full_backup_count
+    full_backup_count=$(echo "$backup_info" | awk '/full backup:/ {count++} END {print count+0}')
     if [ "$full_backup_count" -gt 0 ]; then
         check_item "ok" "全量备份: $full_backup_count 个"
     else
         check_item "error" "没有全量备份"
     fi
     
-    local incr_backup_count=$(echo "$backup_info" | grep -c "incr backup:" || echo "0")
+    local incr_backup_count
+    incr_backup_count=$(echo "$backup_info" | awk '/incr backup:/ {count++} END {print count+0}')
     check_item "info" "增量备份: $incr_backup_count 个"
     
     if [ "$DETAILED" = true ]; then
@@ -215,7 +259,8 @@ check_pvcs() {
     fi
     
     local total_pvcs=$(echo "$pvcs" | wc -l)
-    local bound_pvcs=$(echo "$pvcs" | grep -c "Bound" || echo "0")
+    local bound_pvcs
+    bound_pvcs=$(echo "$pvcs" | awk '$2 == "Bound" {count++} END {print count+0}')
     
     if [ "$bound_pvcs" -eq "$total_pvcs" ]; then
         check_item "ok" "所有 PVC 已绑定 ($bound_pvcs/$total_pvcs)"
@@ -236,8 +281,8 @@ check_connectivity() {
     echo "  数据库连接检查"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    local pod=$(kubectl get pods -n "$NAMESPACE" -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/role=master -o name 2>/dev/null | head -1 || \
-                kubectl get pods -n "$NAMESPACE" -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/instance-set=pgha -o name 2>/dev/null | head -1)
+    local pod=""
+    pod=$(get_database_pod || true)
     
     if [ -z "$pod" ]; then
         check_item "error" "找不到可用的 Pod"

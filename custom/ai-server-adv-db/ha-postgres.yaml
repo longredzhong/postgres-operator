@@ -133,6 +133,26 @@ spec:
         repo1-retention-diff: "6"
         # WAL 归档只保留最近 1 个全量备份窗口，明显降低仓库里的 WAL 占用。
         repo1-retention-archive: "1"
+      jobs:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: NotIn
+                  values:
+                  - adtiger-3090x2
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values:
+                  - adtiger-eq
+                  - adtiger-eq-2
+                  - adtiger-eq-3
       repos:
       - name: repo1
         schedules:
