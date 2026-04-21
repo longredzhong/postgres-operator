@@ -9,13 +9,14 @@ spec:
   # Patroni 需要对短时网络抖动更宽容，避免因为几十秒到几分钟的
   # 控制面/网络闪断而触发不必要的故障转移。
   patroni:
+    # CPK 实际使用 leaderLeaseDurationSeconds 控制 leader lock TTL；
+    # 这里显式设为 90 秒，避免继续沿用默认 30 秒。
+    leaderLeaseDurationSeconds: 90
     dynamicConfiguration:
       # Patroni 每 10 秒检查一次集群状态；保持默认量级，避免过于频繁地放大瞬时抖动。
       loop_wait: 10
       # 遇到 API / DCS / 网络短时异常时多给一些重试时间，减少误判。
       retry_timeout: 30
-      # leader 锁的 TTL 适度放宽到 90 秒，降低家庭网络波动导致的误切主概率。
-      ttl: 90
       # 当 Kubernetes API / DCS 短时不可达时尽可能保持当前主库继续服务，
       # 对家庭环境这种“已知会有短时网络抖动”的场景更友好。
       failsafe_mode: true
@@ -36,7 +37,8 @@ spec:
     parameters:
       # timescaledb 需要预加载，否则后续 CREATE EXTENSION 会报错。
       shared_preload_libraries: "timescaledb"
-      # 避免 backend 进程过多并放大 work_mem 的内存风险。
+      # 当前活跃连接很少、空闲连接很多；收紧上限，逼业务更多走 PgBouncer，
+      # 避免 backend 过多放大每连接内存与管理开销。
       max_connections: 600
       shared_buffers: "4GB"
       # 对容器化数据库而言，planner 看到的 OS page cache 不应直接按内存上限估算；
@@ -85,11 +87,13 @@ spec:
     resources:
       limits:
         cpu: "4"
-        memory: "12Gi"
+        # 运行中主库 database 容器已接近 10Gi；适度上调 limit，
+        # 给 autovacuum / checkpoint / 短时连接峰值留出安全余量。
+        memory: "16Gi"
       requests:
-        # Hatchet 的典型数据库瓶颈更偏 CPU；适当提高 request 能减少节点争用时的抖动。
+        # 主库实测常态内存已明显高于 8Gi；提高 request，避免调度器低估数据库负载。
         cpu: "2"
-        memory: "8Gi"
+        memory: "12Gi"
     dataVolumeClaimSpec:
       accessModes:
       - "ReadWriteOnce"
