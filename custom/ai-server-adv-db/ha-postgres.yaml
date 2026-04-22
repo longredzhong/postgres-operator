@@ -83,10 +83,10 @@ spec:
 
   instances:
   - name: pgha
-    replicas: 2
+    replicas: 1
     resources:
       limits:
-        cpu: "4"
+        cpu: "8"
         # 运行中主库 database 容器已接近 10Gi；适度上调 limit，
         # 给 autovacuum / checkpoint / 短时连接峰值留出安全余量。
         memory: "16Gi"
