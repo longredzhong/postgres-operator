@@ -129,6 +129,41 @@ PgBouncer Service: ai-postgres-pgbouncer-nodeport (NodePort 30433)
 ℹ️  增量备份: 2 个
 ```
 
+#### `k3s-rolling-restart.sh`
+**k3s 串行滚动重启脚本** - 通过 root SSH 依次重启 3 台 control-plane 节点，并在每一步检查本机 `k3s` 与节点 `Ready` 状态。
+
+**用途**:
+- 作为 `05:00` 路由器重启后的临时缓解手段
+- 避免 3 台 control-plane 同时重启
+- 任一步失败立即停止后续重启
+
+**基本用法**:
+```bash
+# 先做 dry-run，确认顺序和参数
+./k3s-rolling-restart.sh --dry-run
+
+# 按默认顺序滚动重启
+./k3s-rolling-restart.sh
+
+# 只重启指定节点
+./k3s-rolling-restart.sh adtiger-eq
+```
+
+**常用参数**:
+- `--dry-run` - 仅打印将执行的动作，不实际重启
+- `--wait-timeout SECONDS` - 单节点恢复超时，默认 `240`
+- `--check-interval SECONDS` - 健康检查轮询间隔，默认 `5`
+- `--post-ready-pause SECONDS` - 单节点恢复后额外等待时间，默认 `20`
+
+**cron 示例**:
+```bash
+10 5 * * * cd /home/longred/self-project/postgres-operator && ./custom/ai-server-adv-db/k3s-rolling-restart.sh >> /var/log/k3s-rolling-restart.log 2>&1
+```
+
+**注意**:
+- 推荐从一台外部管理机统一调度，不要在 3 台 control-plane 上分别配置相同 cron
+- 这是临时缓解措施，不替代修复 k3s/control-plane 底层寻址问题
+
 ### `kustomization.yaml`
 **Kustomize 配置** - 用于 kubectl apply -k 部署
 
