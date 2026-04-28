@@ -160,9 +160,7 @@ spec:
                 - key: kubernetes.io/hostname
                   operator: In
                   values:
-                  - adtiger-eq
-                  - adtiger-eq-2
-                  - adtiger-eq-3
+                  - adtiger-4090x8
       repos:
       - name: repo1
         schedules:

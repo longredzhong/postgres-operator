@@ -115,6 +115,125 @@ get_repo_pod() {
     return 1
 }
 
+usage_status_from_percent() {
+    local use_percent=$1
+    local warn_threshold=$2
+    local error_threshold=$3
+
+    if [ "$use_percent" -ge "$error_threshold" ]; then
+        echo "error"
+    elif [ "$use_percent" -ge "$warn_threshold" ]; then
+        echo "warn"
+    else
+        echo "ok"
+    fi
+}
+
+get_pod_claim_name() {
+    local pod=$1
+    local volume_name=$2
+
+    kubectl get "$pod" -n "$NAMESPACE" \
+        -o jsonpath='{range .spec.volumes[*]}{.name}{"|"}{.persistentVolumeClaim.claimName}{"\n"}{end}' 2>/dev/null \
+        | awk -F'|' -v target_volume="$volume_name" '$1 == target_volume {print $2; exit}'
+}
+
+get_pvc_capacity_info() {
+    local claim_name=$1
+
+    kubectl get pvc "$claim_name" -n "$NAMESPACE" \
+        -o jsonpath='{.spec.volumeName}{"|"}{.status.phase}{"|"}{.status.capacity.storage}{"|"}{.spec.resources.requests.storage}' 2>/dev/null || true
+}
+
+get_mount_usage_info() {
+    local pod=$1
+    local container=$2
+    local mount_path=$3
+
+    kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- df -hP "$mount_path" 2>/dev/null | awk '
+NR == 2 {
+    gsub(/%/, "", $5)
+    printf "filesystem=%s\n", $1
+    printf "size=%s\n", $2
+    printf "used=%s\n", $3
+    printf "avail=%s\n", $4
+    printf "use_percent=%s\n", $5
+    printf "mount=%s\n", $6
+}'
+}
+
+report_pvc_usage() {
+    local pod=$1
+    local container=$2
+    local volume_name=$3
+    local mount_path=$4
+    local pvc_type=$5
+
+    local pod_name=${pod#pod/}
+    local claim_name=""
+    claim_name=$(get_pod_claim_name "$pod" "$volume_name")
+
+    if [ -z "$claim_name" ]; then
+        check_item "warn" "Pod $pod_name 的卷 $volume_name 未关联 PVC，跳过使用率检查"
+        return 0
+    fi
+
+    local pvc_info=""
+    pvc_info=$(get_pvc_capacity_info "$claim_name")
+
+    local pv_name=""
+    local pvc_phase=""
+    local pvc_capacity=""
+    local pvc_request=""
+    IFS='|' read -r pv_name pvc_phase pvc_capacity pvc_request <<< "$pvc_info"
+
+    if [ "$pvc_phase" != "Bound" ]; then
+        check_item "warn" "PVC $claim_name 当前未 Bound，跳过挂载使用率检查"
+        return 0
+    fi
+
+    local mount_info=""
+    mount_info=$(get_mount_usage_info "$pod" "$container" "$mount_path")
+
+    if [ -z "$mount_info" ]; then
+        check_item "warn" "无法读取 Pod $pod_name 挂载点 $mount_path 的使用情况"
+        return 0
+    fi
+
+    local use_percent=""
+    local size=""
+    local used=""
+    local avail=""
+    use_percent=$(awk -F= '$1 == "use_percent" {print $2}' <<< "$mount_info")
+    size=$(awk -F= '$1 == "size" {print $2}' <<< "$mount_info")
+    used=$(awk -F= '$1 == "used" {print $2}' <<< "$mount_info")
+    avail=$(awk -F= '$1 == "avail" {print $2}' <<< "$mount_info")
+
+    if ! [[ "$use_percent" =~ ^[0-9]+$ ]]; then
+        check_item "warn" "挂载点 $mount_path 的使用率格式异常，原始值: ${use_percent:-空}"
+        return 0
+    fi
+
+    local warn_threshold=70
+    local error_threshold=85
+    local pvc_label="数据盘"
+
+    if [ "$pvc_type" = "repo" ]; then
+        warn_threshold=65
+        error_threshold=80
+        pvc_label="备份盘"
+    fi
+
+    local status=""
+    status=$(usage_status_from_percent "$use_percent" "$warn_threshold" "$error_threshold")
+
+    check_item "$status" "$pvc_label PVC $claim_name (PV ${pv_name:-未知}) 使用率 ${use_percent}% (${used}/${size}, 挂载 ${mount_path})"
+
+    if [ "$DETAILED" = true ]; then
+        echo "     Pod: $pod_name, PVC容量: ${pvc_capacity:-未知}, 请求容量: ${pvc_request:-未知}, 可用: ${avail:-未知}"
+    fi
+}
+
 extract_archive_max_wal() {
     local backup_info=$1
 
@@ -467,6 +586,29 @@ check_pvcs() {
         check_item "ok" "所有 PVC 已绑定 ($bound_pvcs/$total_pvcs)"
     else
         check_item "warn" "部分 PVC 未绑定 ($bound_pvcs/$total_pvcs)"
+    fi
+
+    local database_pods=""
+    database_pods=$(kubectl get pods -n "$NAMESPACE" \
+        -l postgres-operator.crunchydata.com/cluster="$CLUSTER_NAME",postgres-operator.crunchydata.com/data=postgres \
+        --no-headers 2>/dev/null | awk '$3 == "Running" {print "pod/" $1}')
+
+    if [ -n "$database_pods" ]; then
+        while IFS= read -r database_pod; do
+            [ -z "$database_pod" ] && continue
+            report_pvc_usage "$database_pod" "database" "postgres-data" "/pgdata" "data"
+        done <<< "$database_pods"
+    else
+        check_item "warn" "未找到运行中的数据库 Pod，跳过数据盘使用率检查"
+    fi
+
+    local repo_pod=""
+    repo_pod=$(get_repo_pod || true)
+
+    if [ -n "$repo_pod" ]; then
+        report_pvc_usage "$repo_pod" "pgbackrest" "repo1" "/pgbackrest/repo1" "repo"
+    else
+        check_item "warn" "未找到运行中的备份 Pod，跳过备份盘使用率检查"
     fi
     
     if [ "$DETAILED" = true ]; then

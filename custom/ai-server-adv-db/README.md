@@ -86,7 +86,7 @@ PgBouncer Service: ai-postgres-pgbouncer-nodeport (NodePort 30433)
 - ✅ Pod 状态检查
 - ✅ Patroni 集群拓扑检查
 - ✅ 备份可用性验证
-- ✅ PVC 存储状态
+- ✅ PVC/PV 绑定状态与 Pod 内实际使用率
 - ✅ 数据库连接测试
 - ✅ 彩色输出，易于识别问题
 
